@@ -5,12 +5,17 @@
 #include <iomanip>
 #include <vector>
 
+struct HalfTimes { double t1, t2; }; // t3 == t1
+struct BlockTimes { double t1u,t2u,t3u,t4,t5d,t6d,t7d; };
+
+struct BlockPlan {
+  BlockTimes t;         // t1u,t2u,t3u,t4,t5d,t6d,t7d
+  double v0, vp, v1;    // entry, peak/cruise, exit speeds
+};
+
 class motion_planner {
     private:
         double accel_max, jerk_max, max_feedrate;
-        // segment times
-        double t1=0,t2=0,t3=0,t4=0,t5=0,t6=0,t7=0;
-        int case_id = 0;
     public:
         std::vector<double> acc, vel, pos;
 
@@ -18,173 +23,168 @@ class motion_planner {
         motion_planner(uint16_t accel, uint16_t jerk, uint16_t feedrate)
         : accel_max(accel), jerk_max(jerk), max_feedrate(feedrate) {}
 
+        BlockPlan plan_single_linear_asym(double L, double v0, double v1,
+                                        double Vmax,
+                                        double Jup, double Aup,
+                                        double Jdn, double Adn)
+        {
+            BlockPlan bp{};
+            bp.v0 = v0; 
+            bp.v1 = v1;
 
-        void plan_SingleLinearMotion(float X_target, float Y_target, float Z_target,
-                        float X_pos,    float Y_pos,    float Z_pos) {
-            const double dX = X_target - X_pos;
-            const double dY = Y_target - Y_pos;
-            const double dZ = Z_target - Z_pos;
-            const double L  = std::sqrt(dX*dX + dY*dY + dZ*dZ);
-            if (L <= 0.0) { 
-                t1=t2=t3=t4=t5=t6=t7=0; 
-                case_id=0; 
-                return; 
+            // Peak speed bracket: vp ∈ [lo, hi]
+            double lo = std::max(v0, v1);
+            double hi = std::max(Vmax, lo);   // ensure hi >= lo
+
+            // Try cruise at hi
+            auto up_try    = solve_half(std::max(0.0, hi - v0), Jup, Aup);
+            auto s_up_try  = s_half(v0, up_try, Jup, Aup);
+
+            auto dn_try    = solve_half(std::max(0.0, hi - v1), Jdn, Adn);
+            auto s_dn_try  = s_half(v1, dn_try, Jdn, Adn);   // <-- FIX: v1, not hi/vp
+
+            double need = s_up_try + s_dn_try;
+            if (L >= need) {
+                bp.t.t1u = up_try.t1; bp.t.t2u = up_try.t2; bp.t.t3u = up_try.t1;
+                bp.t.t5d = dn_try.t1; bp.t.t6d = dn_try.t2; bp.t.t7d = dn_try.t1;
+                bp.t.t4  = (hi > 0.0) ? (L - need) / hi : 0.0;
+                if (bp.t.t4 < 0) bp.t.t4 = 0.0;
+                bp.vp = hi;
+                return bp;
             }
 
-            const double ux = dX/L;
-            const double uy = dY/L;
-            const double uz = dZ/L;
+            // No-cruise: solve vp by bisection
+            for (int it = 0; it < 60; ++it) {
+                double vp    = 0.5 * (lo + hi);
+                auto upM     = solve_half(std::max(0.0, vp - v0), Jup, Aup);
+                auto s_upM   = s_half(v0, upM, Jup, Aup);
 
+                auto dnM     = solve_half(std::max(0.0, vp - v1), Jdn, Adn);
+                auto s_dnM   = s_half(v1, dnM, Jdn, Adn);     // <-- FIX: v1 here too
 
-            t1 = accel_max / jerk_max;
-            const double t2_cap = std::max(0.0, max_feedrate/accel_max - t1);
-            const double s_ad   = 2*(accel_max*t1*t1 + 1.5*accel_max*t1*t2_cap + 0.5*accel_max*t2_cap*t2_cap);
-            constexpr double EPS = 1e-6;
-
-            if (std::abs(L - s_ad) <= EPS) {
-                t2=t2_cap; t3=t1; t4=0; t5=t1; t6=t2_cap; t7=t1;
-                case_id = (t2_cap==0.0) ? 4 : 3; // edge collapses to case 4 if no plateau
-                //return;
+                double f = s_upM + s_dnM - L;
+                if (f > 0) hi = vp; else lo = vp;
+                if (std::abs(f) < 1e-12) { lo = hi = vp; break; }
             }
-            else if (L > s_ad) {
-                const double v_acc = accel_max*(t1+t2_cap);
-                t2=t2_cap; t3=t1; t4=(L-s_ad)/v_acc; t5=t1; t6=t2_cap; t7=t1;
-                case_id = (t2_cap==0.0) ? 1 : 2;
-                //return;
-            }
-            else {
-                const double a=1.0, b=3.0*t1, c=2.0*t1*t1 - L/accel_max;
-                double t2_sol = posRootQuad(a,b,c);
+            bp.vp = 0.5 * (lo + hi);
 
-                if (t2_sol >= -EPS) {                 // got a non-negative solution (within tol)
-                    t2_sol = std::max(0.0, t2_sol);   // clamp tiny negatives to 0
-                    const double v_acc = accel_max * (t1 + t2_sol);
-                    if (t2_sol <= t2_cap + EPS && v_acc <= max_feedrate + 1e-12) {
-                        if (t2_sol <= EPS) {
-                            // Case 4: no cruise, t2 == 0 (edge for this L)
-                            t2=0; t3=t1; t4=0; t5=t1; t6=0; t7=t1;
-                            case_id = 4;
-                            //return;
-                        } else {
-                            // Case 3: no cruise, t2 > 0
-                            t2=t2_sol; t3=t1; t4=0; t5=t1; t6=t2_sol; t7=t1;
-                            case_id = 3;
-                            //return;
-                        }
-                    }
-                }
+            auto upF = solve_half(std::max(0.0, bp.vp - v0), Jup, Aup);
+            auto dnF = solve_half(std::max(0.0, bp.vp - v1), Jdn, Adn);
 
-                // Case 5: no-cruise, reduce t1 (pure jerk-bounded)
-                const double t1p = std::cbrt(L / (2.0 * jerk_max));
-                t1=t1p; t2=0; t3=t1p; t4=0; t5=t1p; t6=0; t7=t1p;
-                case_id = 5;
-            }
-            sample_profile(2000,acc,vel,pos,t1,t2,t3,t4,t5,t6,t7,accel_max,jerk_max);
+            bp.t.t1u = upF.t1; bp.t.t2u = upF.t2; bp.t.t3u = upF.t1;
+            bp.t.t4  = 0.0;
+            bp.t.t5d = dnF.t1; bp.t.t6d = dnF.t2; bp.t.t7d = dnF.t1;
+
+            // Clamp tiny negatives to zero
+            auto clamp0 = [](double& x){ if (x < 1e-12) x = 0.0; };
+            clamp0(bp.t.t1u); clamp0(bp.t.t2u); clamp0(bp.t.t3u);
+            clamp0(bp.t.t4);  clamp0(bp.t.t5d); clamp0(bp.t.t6d); clamp0(bp.t.t7d);
+
+            return bp;
         }
+
+
 
         
 
-        void sample_profile(double fs,
-                    std::vector<double>& a_out,
-                    std::vector<double>& v_out,
-                    std::vector<double>& s_out,
-                    double t1, double t2, double t3, double t4,
-                    double t5, double t6, double t7,
-                    double A,  double J)
+        void sample_profile_asym(double fs,
+            const BlockTimes& bt,
+            double v0, double vp, double v1,
+            double Jup, double Aup,
+            double Jdn, double Adn,
+            std::vector<double>& a_out,
+            std::vector<double>& v_out,
+            std::vector<double>& s_out)
         {
+            const double t1u=bt.t1u, t2u=bt.t2u, t3u=bt.t3u;
+            const double t4 =bt.t4;
+            const double t5d=bt.t5d, t6d=bt.t6d, t7d=bt.t7d;
+
             const double dt = 1.0 / fs;
-            const double T  = t1+t2+t3+t4+t5+t6+t7;
+            const double T  = t1u+t2u+t3u+t4+t5d+t6d+t7d;
+            if (T <= 0) { a_out.clear(); v_out.clear(); s_out.clear(); return; }
 
-            const size_t N = static_cast<size_t>(std::floor(T/dt)) + 1;
-            a_out.assign(N, 0.0);
-            v_out.assign(N, 0.0);
-            s_out.assign(N, 0.0);
+            const std::size_t N = static_cast<std::size_t>(std::floor(T/dt)) + 1;
+            a_out.assign(N, 0.0); v_out.assign(N, 0.0); s_out.assign(N, 0.0);
 
-            // Segment boundaries (cumulative)
-            const double b1 = t1;
-            const double b2 = b1 + t2;
-            const double b3 = b2 + t3;                 // = t1+t2+t1
-            const double b4 = b3 + t4;
-            const double b5 = b4 + t5;                 // + t1
-            const double b6 = b5 + t6;                 // + t2
-            const double b7 = b6 + t7;                 // + t1 == T
+            // Use A_eff for triangular halves
+            const double Aup_eff = (t2u > 0) ? Aup : (Jup * t1u);
+            const double Adn_eff = (t6d > 0) ? Adn : (Jdn * t5d);
 
-            // Useful constants at segment boundaries
-            const double v1 = 0.5*J*t1*t1;
-            const double s1 = (1.0/6.0)*J*t1*t1*t1;
+            // Boundaries
+            const double b1=t1u, b2=b1+t2u, b3=b2+t3u, b4=b3+t4, b5=b4+t5d, b6=b5+t6d, b7=b6+t7d;
 
-            const double v2 = v1 + A*t2;
-            const double s2 = s1 + v1*t2 + 0.5*A*t2*t2;
+            // Acc half end states (with Aup_eff)
+            const double v1e = v0 + 0.5*Jup*t1u*t1u;
+            const double s1e = v0*t1u + (1.0/6.0)*Jup*t1u*t1u*t1u;
 
-            // End of seg3 (accel phase finished, accel back to 0)
-            const double v3 = v2 + (A*t1 - 0.5*J*t1*t1);        // = v2 + v1
-            const double s3 = s2 + v2*t1 + 0.5*A*t1*t1 - (1.0/6.0)*J*t1*t1*t1;
+            const double v2e = v1e + Aup_eff*t2u;
+            const double s2e = s1e + v1e*t2u + 0.5*Aup_eff*t2u*t2u;
 
-            const double v_acc = v3;                             // cruise speed
-            const double s4 = s3 + v_acc*t4;
+            const double v3e = v2e + Aup_eff*t3u - 0.5*Jup*t3u*t3u; // == vp
+            const double s3e = s2e + v2e*t3u + 0.5*Aup_eff*t3u*t3u - (1.0/6.0)*Jup*t3u*t3u*t3u;
 
-            // Start of seg6 (after seg5)
-            const double v5e = v_acc - 0.5*J*t1*t1;              // end of seg5
-            const double s5e = s4 + v_acc*t1 - (1.0/6.0)*J*t1*t1*t1;
+            // Cruise
+            const double s4e = s3e + vp*t4;
 
-            // Start of seg7 (after seg6)
-            const double v6e = v5e - A*t2;                       // = v1
-            const double s6e = s5e + v5e*t2 - 0.5*A*t2*t2;
+            // Dec half end states (with Adn_eff)
+            const double v5e = vp - 0.5*Jdn*t5d*t5d;
+            const double s5e = s4e + vp*t5d - (1.0/6.0)*Jdn*t5d*t5d*t5d;
 
-            // Sample
-            for (size_t i = 0; i < N; ++i) {
+            const double v6e = v5e - Adn_eff*t6d;
+            const double s6e = s5e + v5e*t6d - 0.5*Adn_eff*t6d*t6d;
+
+            for (std::size_t i=0; i<N; ++i) {
                 const double t = i*dt;
                 double a, v, s;
 
-                if (t < b1) {                     // seg1: +J
-                    const double tau = t;
-                    a = J*tau;
-                    v = 0.5*J*tau*tau;
-                    s = (1.0/6.0)*J*tau*tau*tau;
+                if (t < b1) { // seg1 +Jup
+                    const double tau=t;
+                    a =  Jup*tau;
+                    v =  v0 + 0.5*Jup*tau*tau;
+                    s =  v0*tau + (1.0/6.0)*Jup*tau*tau*tau;
                 }
-                else if (t < b2) {                // seg2: +A
-                    const double tau = t - b1;
-                    a = A;
-                    v = v1 + A*tau;
-                    s = s1 + v1*tau + 0.5*A*tau*tau;
+                else if (t < b2) { // seg2 +Aup_eff
+                    const double tau=t-b1;
+                    a =  Aup_eff;
+                    v =  v1e + Aup_eff*tau;
+                    s =  s1e + v1e*tau + 0.5*Aup_eff*tau*tau;
                 }
-                else if (t < b3) {                // seg3: -J
-                    const double tau = t - b2;
-                    a = A - J*tau;
-                    v = v2 + A*tau - 0.5*J*tau*tau;
-                    s = s2 + v2*tau + 0.5*A*tau*tau - (1.0/6.0)*J*tau*tau*tau;
+                else if (t < b3) { // seg3 -Jup from Aup_eff
+                    const double tau=t-b2;
+                    a =  Aup_eff - Jup*tau;
+                    v =  v2e + Aup_eff*tau - 0.5*Jup*tau*tau;
+                    s =  s2e + v2e*tau + 0.5*Aup_eff*tau*tau - (1.0/6.0)*Jup*tau*tau*tau;
                 }
-                else if (t < b4) {                // seg4: cruise
-                    const double tau = t - b3;
-                    a = 0.0;
-                    v = v_acc;
-                    s = s3 + v_acc*tau;
+                else if (t < b4) { // cruise
+                    const double tau=t-b3;
+                    a = 0.0; v = vp; s = s3e + vp*tau;
                 }
-                else if (t < b5) {                // seg5: -J
-                    const double tau = t - b4;
-                    a = -J*tau;
-                    v = v_acc - 0.5*J*tau*tau;
-                    s = s4 + v_acc*tau - (1.0/6.0)*J*tau*tau*tau;
+                else if (t < b5) { // seg5 -Jdn
+                    const double tau=t-b4;
+                    a = -Jdn*tau;
+                    v =  vp - 0.5*Jdn*tau*tau;
+                    s =  s4e + vp*tau - (1.0/6.0)*Jdn*tau*tau*tau;
                 }
-                else if (t < b6) {                // seg6: -A
-                    const double tau = t - b5;
-                    a = -A;
-                    v = v5e - A*tau;
-                    s = s5e + v5e*tau - 0.5*A*tau*tau;
+                else if (t < b6) { // seg6 -Adn_eff
+                    const double tau=t-b5;
+                    a = -Adn_eff;
+                    v =  v5e - Adn_eff*tau;
+                    s =  s5e + v5e*tau - 0.5*Adn_eff*tau*tau;
                 }
-                else {                             // seg7: +J
-                    const double tau = t - b6;
-                    a = -A + J*tau;
-                    v = v6e - A*tau + 0.5*J*tau*tau;
-                    s = s6e + v6e*tau - 0.5*A*tau*tau + (1.0/6.0)*J*tau*tau*tau;
+                else {             // seg7 +Jdn back to zero accel
+                    const double tau=t-b6;
+                    a = -Adn_eff + Jdn*tau;
+                    v =  v6e - Adn_eff*tau + 0.5*Jdn*tau*tau;
+                    s =  s6e + v6e*tau - 0.5*Adn_eff*tau*tau + (1.0/6.0)*Jdn*tau*tau*tau;
                 }
 
-                a_out[i] = a;
-                v_out[i] = v;
-                s_out[i] = s;
+                a_out[i]=a; v_out[i]=v; s_out[i]=s;
             }
-            std::cout << "Computed acc, vel and pos\n";
         }
+
+
+        
 
         void print_timeSteps(const std::vector<double>& acc,
                             const std::vector<double>& vel,
@@ -201,11 +201,10 @@ class motion_planner {
             }
         }
 
-        void print_profile() const {
-            std::cout << "Case " << case_id << " selected\n";
+        void print_profile(BlockTimes t) const {
             std::cout << std::fixed << std::setprecision(6);
-            std::cout << "t1="<<t1<<" t2="<<t2<<" t3="<<t3<<" t4="<<t4
-                    <<" t5="<<t5<<" t6="<<t6<<" t7="<<t7<<"\n";
+            std::cout << "t1="<<t.t1u<<" t2="<<t.t2u<<" t3="<<t.t3u<<" t4="<<t.t4
+                    <<" t5="<<t.t5d<<" t6="<<t.t6d<<" t7="<<t.t7d<<"\n";
         }
 
         void update(double newAccel, double newFeed, double newJerk){
@@ -218,23 +217,26 @@ class motion_planner {
         }
 
     private:
-        static inline double posRootQuad(double a,double b,double c, double eps=1e-9){
-            double D = b*b - 4*a*c;
-            if (D < -eps) return -1.0;                 // no real roots
-            double r = (std::abs(D) <= eps) ? 0.0 : std::sqrt(D);
-            double x1 = (-b + r)/(2*a);
-            double x2 = (-b - r)/(2*a);
 
-            // Accept non-negative within tolerance; clamp tiny negatives to 0
-            double best = 1e300;
-            if (x1 >= -eps) best = std::min(best, std::max(0.0, x1));
-            if (x2 >= -eps) best = std::min(best, std::max(0.0, x2));
-
-            return (best==1e300) ? -1.0 : best;
+        inline HalfTimes solve_half(double dv, double J, double A) {
+            HalfTimes h{};
+            double t1 = A/J;
+            if (dv >= A*t1) {             // with plateau
+                h.t1 = t1;
+                h.t2 = dv/A - t1;
+            } else {                      // triangular: reduce peak accel
+                h.t1 = std::sqrt(dv / J);
+                h.t2 = 0.0;
+            }
+            return h;
         }
 
-        static inline double Sad(double A,double t1,double t2){
-            return 2.0 * (A*t1*t1 + 1.5*A*t1*t2 + 0.5*A*t2*t2);
+        inline double s_half(double v_start, const HalfTimes& h, double J, double A) {
+            // If triangular, A means J*h.t1
+            const double Aeff = (h.t2>0) ? A : (J*h.t1);
+            return v_start * (2*h.t1 + h.t2)
+                + (Aeff*h.t1*h.t1 + 1.5*Aeff*h.t1*h.t2 + 0.5*Aeff*h.t2*h.t2);
         }
+
 
 };

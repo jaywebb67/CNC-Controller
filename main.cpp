@@ -19,14 +19,20 @@ int main() {
   // mp.print_profile();
 
   // L = 100 mm
-  mp.plan_SingleLinearMotion(60,80,0,0,0,0);
-  mp.print_timeSteps(mp.acc,mp.vel,mp.pos,2000);
-  mp.print_profile();
+  auto plan = mp.plan_single_linear_asym(1, /*v0=*/0.0, /*v1=*/0.0,/*vp=*/100,
+                                      /*Jup=*/10000, /*Aup=*/1000,
+                                      /*Jdn=*/10000, /*Adn=*/1000);
 
-  mp.update(1000,200,10000);
-  mp.plan_SingleLinearMotion(100,0,0,0,0,0);
+  mp.sample_profile_asym(2000.0, plan.t, plan.v0, plan.vp, plan.v1,
+                    10000, 1000, 10000, 1000,
+                    mp.acc, mp.vel, mp.pos);
+
   mp.print_timeSteps(mp.acc,mp.vel,mp.pos,2000);
-  mp.print_profile();
+  mp.print_profile(plan.t);
+  // mp.update(1000,200,10000);
+  // mp.plan_SingleLinearMotion(100,0,0,0,0,0);
+  // mp.print_timeSteps(mp.acc,mp.vel,mp.pos,2000);
+  // mp.print_profile();
 
   // mp.plan_SingleLinearMotion(30,0,0,0,0,0);
   // mp.print_timeSteps(mp.acc,mp.vel,mp.pos,2000);
