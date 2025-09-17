@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build app (ucrt64 g++)",
+      "type": "process",
+      "command": "C:\\msys64\\ucrt64\\bin\\g++.exe",
+      "args": [
+        "-std=c++17",
+        "-g",
+        "${workspaceFolder}\\main.cpp",
+        "-o",
+        "${workspaceFolder}\\build\\app.exe"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "echo": true }
+    }
+  ]
+}
