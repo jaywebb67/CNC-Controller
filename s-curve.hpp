@@ -26,6 +26,15 @@ struct MultiBlockPlan {
   std::vector<BlockPlan> blocks;          // full S-curve plan per block
 };
 
+struct BlockGeom {
+  Vec3  P0_raw, P1_raw;   // from pts[i], pts[i+1]
+  Vec3  u_raw;            // unit(P1_raw - P0_raw)
+  double L_raw;
+  double dL, dR;          // trims
+  Vec3  P0_trim, P1_trim; // P0' and P1'
+  double L_trim;
+};
+
 class motion_planner {
     private:
         double accel_max, Jup, deccel_max, Jdn;
@@ -242,7 +251,7 @@ class motion_planner {
             const double T  = t1u+t2u+t3u+t4+t5d+t6d+t7d;
             if (T <= 0) { a_out.clear(); v_out.clear(); s_out.clear(); return; }
 
-            const std::size_t N = static_cast<std::size_t>(std::floor(T/dt)) + 1;
+            const std::size_t N = static_cast<std::size_t>(std::llround(T/dt)) + 1;
             a_out.assign(N, 0.0); v_out.assign(N, 0.0); s_out.assign(N, 0.0);
 
             // Use A_eff for triangular halves
@@ -273,7 +282,7 @@ class motion_planner {
             const double s6e = s5e + v5e*t6d - 0.5*Adn_eff*t6d*t6d;
 
             for (std::size_t i=0; i<N; ++i) {
-                const double t = i*dt;
+                const double t = std::min(i*dt,T);
                 double a, v, s;
 
                 if (t < b1) { // seg1 +Jup
@@ -319,6 +328,8 @@ class motion_planner {
 
                 a_out[i]=a; v_out[i]=v; s_out[i]=s;
             }
+            a_out.back() = 0.0;
+            v_out.back() = v1;
         }
 
         void sample_profile_asym(double fs,const BlockTimes& bt,
@@ -371,7 +382,74 @@ class motion_planner {
                 ofs << i << ',' << t << ',' << acc[i] << ',' << vel[i] << ',' << pos[i] << '\n';
             }
         }
+        // Overload: save a single block's series with geometry columns included.
+        void save_timeSteps_csv_extended(const std::string& csv_path,
+                                        double fs,
+                                        const BlockGeom& G,
+                                        const std::vector<double>& acc,
+                                        const std::vector<double>& vel,
+                                        const std::vector<double>& s,
+                                        const std::vector<double>& X,
+                                        const std::vector<double>& Y,
+                                        const std::vector<double>& Z) const
+        {
+        const std::size_t N = std::min({acc.size(), vel.size(), s.size(),
+                                        X.size(), Y.size(), Z.size()});
+        std::ofstream ofs(csv_path, std::ios::trunc);
+        if (!ofs) {
+            std::cerr << "Failed to open CSV file: " << csv_path << "\n";
+            return;
+        }
+        ofs << std::fixed << std::setprecision(9);
 
+        // Header
+        ofs << "index,time_s,acc,vel,s,X,Y,Z,"
+                "L_raw,L_trim,ux,uy,uz\n";
+
+        const double dt = (fs > 0.0) ? 1.0 / fs : 0.0;
+        for (std::size_t i = 0; i < N; ++i) {
+            const double t = i * dt;
+            ofs << i << ',' << t << ','
+                << acc[i] << ',' << vel[i] << ',' << s[i] << ','
+                << X[i]   << ',' << Y[i]   << ',' << Z[i]   << ','
+                << G.L_raw << ',' << G.L_trim << ','
+                << G.u_raw.x << ',' << G.u_raw.y << ',' << G.u_raw.z
+                << '\n';
+        }
+        }
+
+
+        static BlockGeom make_block_geom(const Vec3& P0, const Vec3& P1,
+                                 double dL, double dR) {
+            BlockGeom g{};
+            g.P0_raw = P0; g.P1_raw = P1;
+            Vec3 d = P1 - P0;
+            g.L_raw = norm(d);
+            g.u_raw = (g.L_raw > 0) ? (d / g.L_raw) : Vec3{0,0,0};
+            g.dL = dL; g.dR = dR;
+            g.P0_trim = P0 + g.u_raw * dL;
+            g.P1_trim = P1 - g.u_raw * dR;
+            g.L_trim  = norm(g.P1_trim - g.P0_trim);
+            return g;
+        }
+
+            // Map one block’s sampled s(t) to XYZ positions
+        static void map_block_positions(const BlockGeom& g,
+                                        const std::vector<double>& s_block,
+                                        std::vector<double>& X,
+                                        std::vector<double>& Y,
+                                        std::vector<double>& Z) {
+            const size_t N = s_block.size();
+            X.resize(N); Y.resize(N); Z.resize(N);
+            for (size_t i=0;i<N;++i) {
+                double s = std::min(std::max(0.0, s_block[i]), g.L_trim);
+                Vec3 p = g.P0_trim + g.u_raw * s;
+                X[i] = p.x; Y[i] = p.y; Z[i] = p.z;
+            }
+            if (N) { // snap the very last exactly
+                X.back() = g.P1_trim.x; Y.back() = g.P1_trim.y; Z.back() = g.P1_trim.z;
+            }
+        }
 
         void update(double newAccel, double newJup, double newJdn,double newDeccel){
 

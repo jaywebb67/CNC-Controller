@@ -9,6 +9,20 @@ static inline Vec3 operator-(const Vec3& a, const Vec3& b){
      return {a.x-b.x,a.y-b.y,a.z-b.z}; 
 }
 
+static inline Vec3 operator+(const Vec3& a, const Vec3& b){
+     return {a.x+b.x,a.y+b.y,a.z+b.z}; 
+}
+
+
+inline Vec3 operator*(const Vec3& v, double s) { 
+    return { v.x*s, v.y*s, v.z*s }; 
+}
+
+inline Vec3 operator/(const Vec3& v, double s) { 
+    return { v.x/s, v.y/s, v.z/s }; 
+}
+
+
 static inline double dot(const Vec3& a, const Vec3& b){
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
