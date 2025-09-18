@@ -15,18 +15,18 @@ struct BlockPlan {
 
 class motion_planner {
     private:
-        double accel_max, jerk_max, max_feedrate;
-    public:
+        double accel_max, Jup, deccel_max, Jdn;
+    
+    
+        public:
         std::vector<double> acc, vel, pos;
 
-    public:
-        motion_planner(uint16_t accel, uint16_t jerk, uint16_t feedrate)
-        : accel_max(accel), jerk_max(jerk), max_feedrate(feedrate) {}
+
+        motion_planner(double accel, double jerkU, double deccel, double jerkD)
+        : accel_max(accel), Jup(jerkU), deccel_max(deccel), Jdn(jerkD) {}
 
         BlockPlan plan_single_linear_asym(double L, double v0, double v1,
-                                        double Vmax,
-                                        double Jup, double Aup,
-                                        double Jdn, double Adn)
+                                        double Vmax,double Aup,double Adn)
         {
             BlockPlan bp{};
             bp.v0 = v0; 
@@ -84,16 +84,15 @@ class motion_planner {
         }
 
 
-
+        BlockPlan plan_single_linear_asym(double L, double v0, double v1,
+                                        double Vmax) {
+            return plan_single_linear_asym(L, v0, v1, Vmax, accel_max, deccel_max);
+        }
         
 
-        void sample_profile_asym(double fs,
-            const BlockTimes& bt,
-            double v0, double vp, double v1,
-            double Jup, double Aup,
-            double Jdn, double Adn,
-            std::vector<double>& a_out,
-            std::vector<double>& v_out,
+        void sample_profile_asym(double fs,const BlockTimes& bt,
+            double v0, double vp, double v1,double Aup, double Adn,
+            std::vector<double>& a_out,std::vector<double>& v_out,
             std::vector<double>& s_out)
         {
             const double t1u=bt.t1u, t2u=bt.t2u, t3u=bt.t3u;
@@ -183,8 +182,12 @@ class motion_planner {
             }
         }
 
-
-        
+        void sample_profile_asym(double fs,const BlockTimes& bt,
+            double v0, double vp, double v1,std::vector<double>& a_out,
+            std::vector<double>& v_out,std::vector<double>& s_out)
+        {
+            return sample_profile_asym(fs,bt,v0,vp,v1,accel_max,deccel_max,a_out,v_out,s_out);
+        }
 
         void print_timeSteps(const std::vector<double>& acc,
                             const std::vector<double>& vel,
@@ -207,12 +210,12 @@ class motion_planner {
                     <<" t5="<<t.t5d<<" t6="<<t.t6d<<" t7="<<t.t7d<<"\n";
         }
 
-        void update(double newAccel, double newFeed, double newJerk){
+        void update(double newAccel, double newJup, double newJdn,double newDeccel){
 
             accel_max = newAccel;
-            max_feedrate = newFeed;
-            jerk_max = newJerk;
-            
+            Jup = newJup;
+            Jdn = newJdn;
+            deccel_max = newDeccel;
 
         }
 
